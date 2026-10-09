@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import {OrbitControls} from './assets/OrbitControls.js';
-import {buildWallCutaway, wallFacesCamera} from './cutaway.mjs';
+import {buildWallCutaway, wallFacesCamera, wallExplosionOffset} from './cutaway.mjs?v=20261009-2';
 import {ArchitecturalRenderer,createSurfaceDetail,finishProfile} from './realism.mjs';
 import {AC_BOUNDS,SPAWN,canStand,moveOnPlan,walkingVector,QUALITY} from './navigation.mjs';
 
@@ -11,6 +11,7 @@ const scene=new THREE.Scene();
 const orbitCamera=new THREE.OrthographicCamera(-12,12,10,-10,.01,250);
 const walkCamera=new THREE.PerspectiveCamera(68,1,.035,100);
 let camera=orbitCamera,walking=false,freeLook=false,savedWalkState=null,yaw=Math.PI/2,pitch=0;
+let lookPending=false,lookRequested=false,lookRequestId=0;
 const mobileDevice=matchMedia('(pointer:coarse)').matches||Math.min(screen.width,screen.height)<600;
 let qualityName=mobileDevice?'mobile':'balanced',quality=QUALITY[qualityName],dirty=true,shadowDirty=true;
 let lastRender=0,lightRefresh=0,slowFrames=0,qualityChangedAt=0;
@@ -185,12 +186,19 @@ function updateLightPool(){
 }
 function obstacles(){return objects.filter(o=>['Furniture','Casework'].includes(o.d.category)&&o.d.bounds[0][1]<1.8).map(o=>o.d.bounds.map(b=>[b[0]+o.group.position.x,b[1],b[2]+o.group.position.z]));}
 function lookBy(dx,dy,sensitivity=.002){yaw-=dx*sensitivity;pitch=Math.max(-1.45,Math.min(1.45,pitch-dy*sensitivity));walkCamera.rotation.set(pitch,yaw,0,'YXZ');invalidate();}
-function releaseLook(){freeLook=false;if(document.pointerLockElement===renderer.domElement)document.exitPointerLock();updateLookUI();}
-function updateLookUI(){document.body.classList.toggle('free-look',walking&&freeLook);$('#freelook').setAttribute('aria-pressed',String(freeLook));$('#freelook').textContent=freeLook?'F · Release mouse':'F · Free look';}
+function releaseLook(){lookRequested=lookPending=freeLook=false;lookRequestId++;if(document.pointerLockElement===renderer.domElement)document.exitPointerLock();$('#look-status').hidden=true;updateLookUI();}
+function updateLookUI(){document.body.classList.toggle('free-look',walking&&freeLook);$('#freelook').setAttribute('aria-pressed',String(freeLook));$('#freelook').textContent=freeLook?'F · Release mouse':lookPending?'Capturing mouse…':'F · Free look';}
+function captureFailed(){
+ if(!lookRequested||document.pointerLockElement===renderer.domElement)return;
+ lookRequested=lookPending=freeLook=false;lookRequestId++;keys.clear();updateLookUI();
+ if(walking){$('#look-status').hidden=false;toast('Mouse capture was blocked. Click Free look to retry.');}
+}
 async function toggleLook(){
- if(!walking)return;if(freeLook){releaseLook();return;}freeLook=true;updateLookUI();
+ if(!walking)return;if(freeLook||lookPending){releaseLook();return;}
+ lookRequested=lookPending=true;const requestId=++lookRequestId;$('#look-status').hidden=true;updateLookUI();
+ // Call directly from the click/key gesture. Only pointerlockchange enables look.
  try{if(!renderer.domElement.requestPointerLock)throw Error('unavailable');await renderer.domElement.requestPointerLock();}
- catch{toast('Mouse capture unavailable here. Free look works while the pointer is over the model.');}
+ catch{if(requestId===lookRequestId)captureFailed();}
 }
 function enterWalk(){
  if(walking)return;
@@ -232,9 +240,17 @@ function wireWalk(){
  document.addEventListener('keyup',e=>keys.delete(e.code));
  const clearMovement=()=>{keys.clear();touchKeys.clear();lookTouch=null;};
  window.addEventListener('blur',()=>{clearMovement();releaseLook();});document.addEventListener('visibilitychange',()=>{clearMovement();if(document.hidden)releaseLook();else invalidate();});
- document.addEventListener('pointerlockchange',()=>{freeLook=document.pointerLockElement===renderer.domElement;if(!freeLook)keys.clear();updateLookUI();});
- document.addEventListener('pointerlockerror',()=>{if(walking)toast('Move the mouse over the model to look; press F to release.');});
- document.addEventListener('mousemove',e=>{if(walking&&freeLook&&(document.pointerLockElement===renderer.domElement||e.target===renderer.domElement))lookBy(e.movementX,e.movementY);});
+ document.addEventListener('pointerlockchange',()=>{
+  const locked=document.pointerLockElement===renderer.domElement;
+  // A request can complete after Escape, blur, or leaving walk mode.
+  if(locked&&(!walking||!lookRequested)){document.exitPointerLock();return;}
+  freeLook=locked;lookPending=false;
+  if(!locked){lookRequested=false;lookRequestId++;keys.clear();}
+  else $('#look-status').hidden=true;
+  updateLookUI();
+ });
+ document.addEventListener('pointerlockerror',captureFailed);
+ document.addEventListener('mousemove',e=>{if(walking&&freeLook&&document.pointerLockElement===renderer.domElement)lookBy(e.movementX,e.movementY);});
  renderer.domElement.addEventListener('pointercancel',()=>{lookTouch=null;down=null;});
  for(const button of $$('[data-walk-key]')){
   button.addEventListener('pointerdown',e=>{e.preventDefault();button.setPointerCapture(e.pointerId);touchKeys.set(e.pointerId,button.dataset.walkKey);});
@@ -245,7 +261,7 @@ function animate(now){requestAnimationFrame(animate);if(document.hidden){frameTi
  for(const o of objects){const moving=Math.abs(o.target-o.progress)>.00001;if(!moving&&!exploding&&o.initialized&&!(o.d.kind==='ac'&&o.target))continue;o.initialized=true;invalidate(moving||exploding);o.progress+=(o.target-o.progress)*lerp;if(Math.abs(o.target-o.progress)<.0001)o.progress=o.target;const d=o.d;let x=0,y=0,z=0;
   if(d.layer==='ceiling'){y=explode*(3.2+(o.center.y-3)*.4);}
   else if(d.layer==='floor'){y=-explode*(o.center.y<.13?1.4:.6);}
-  else if(d.layer==='wall'){y=explode*.5;const wide=d.bounds[1][0]-d.bounds[0][0]>d.bounds[1][2]-d.bounds[0][2];if(wide)z=Math.sign(o.center.z)*explode*1.45;else x=Math.sign(o.center.x)*explode*1.45;}
+  else if(o.wallCutaway){[x,y,z]=wallExplosionOffset(o.wallCutaway,explode);}
   if(d.kind==='chair'){x+=o.slide.x*o.progress;z+=o.slide.z*o.progress;}
   o.group.position.set(x,y,z);if(o.contact)o.contact.visible=explode<.01;
   if(d.kind==='door'){const p=o.progress;o.openGroup.visible=p>.9999;o.closedGroup.visible=!o.openGroup.visible;for(const leaf of o.leaves){leaf.g.position.set(leaf.center[0]+(leaf.openCenter[0]-leaf.center[0])*p,leaf.center[1]+(leaf.openCenter[1]-leaf.center[1])*p,leaf.center[2]+(leaf.openCenter[2]-leaf.center[2])*p);leaf.g.rotation.y=leaf.angle*p;}}

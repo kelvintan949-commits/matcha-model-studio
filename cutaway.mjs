@@ -34,6 +34,13 @@ export function buildWallCutaway(elements) {
   return bindings;
 }
 
+// Translate the complete wall assembly rigidly, including narrow trims, the
+// folding door and mounted objects. Position relative to the origin is not a
+// reliable outward direction for the L-shaped corridor.
+export function wallExplosionOffset(binding, amount) {
+  return [binding.normal[0] * amount * 1.45, amount * .5, binding.normal[2] * amount * 1.45];
+}
+
 export function wallFacesCamera(normal, towardCamera, previouslyHidden = false) {
   const length = Math.hypot(...towardCamera);
   if (!length) return false;
